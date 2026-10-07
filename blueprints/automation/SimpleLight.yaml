@@ -5,7 +5,7 @@ blueprint:
   author: Teddy
   source_url: https://github.com/TeodTodo/SimpleLight/blob/main/blueprints/automation/SimpleLight.yaml
   homeassistant:
-    min_version: "2024.10.0"
+    min_version: "2025.4.0"
   input:
     remote:
       name: Philips Hue Dimmer Switch
@@ -45,11 +45,21 @@ blueprint:
         text:
           multiline: false
           multiple: false
-    pink_color:
-      name: Button 4 color
-      default: [199, 21, 133]
+    colors:
+      name: Button 4 colors
+      description: Each press of button 4 switches the lights to the next color in this list, then starts again from the first.
+      default:
+        - color: [199, 21, 133]
       selector:
-        color_rgb: {}
+        object:
+          multiple: true
+          label_field: color
+          fields:
+            color:
+              label: Color
+              required: true
+              selector:
+                color_rgb: {}
 
 mode: restart
 trace:
@@ -97,7 +107,7 @@ triggers:
     device_id: !input remote
     type: action
     subtype: off_press_release
-    id: pink
+    id: color
     enabled: !input enable_mqtt_triggers
   # Philips Hue integration dimmer
   - trigger: event
@@ -146,7 +156,7 @@ triggers:
       device_id: !input remote
       type: short_release
       subtype: 4
-    id: pink
+    id: color
     enabled: !input enable_hue_triggers
 
 conditions:
@@ -159,6 +169,17 @@ conditions:
 variables:
   target: !input controlled_lights
   z2m_base: !input z2m_base_topic
+  color_input: !input colors
+  # Accepts list items as {color: [r, g, b]} or as a bare [r, g, b].
+  color_list: |-
+    {% set ns = namespace(c=[]) %} {% for i in (color_input if color_input is iterable and color_input is not string else []) %}
+      {% set c = i.color if i is mapping else i %}
+      {% if c is iterable and c is not string and c | count == 3 %}
+        {% set ns.c = ns.c + [c | map('int') | list] %}
+      {% endif %}
+    {% endfor %} {{ ns.c }}
+  # Squared distance (on brightness-normalized RGB) below which a lamp counts as showing a list color.
+  color_match_max: 0.15
   warm_kelvin: 2000
   warm_brightness_pct: 100
   warm_mired: "{{ (1000000 / warm_kelvin) | round(0) | int }}"
@@ -463,13 +484,40 @@ actions:
                        | max | round(0) | int }}
                   transition: 0
 
-      # Button 4: color
+      # Button 4: next color from the list. The current color is read from the lamps,
+      # so no helper is needed: closest list color -> the one after it; anything else -> the first.
       - conditions:
           - condition: trigger
-            id: pink
+            id: color
+          - condition: template
+            value_template: "{{ color_list | count > 0 }}"
         sequence:
+          - variables:
+              cur_rgb: |-
+                {% set ns = namespace(c=[]) %} {% for e in state_ids | select('is_state', 'on') %}
+                  {% set c = state_attr(e, 'rgb_color') %}
+                  {% if ns.c | count == 0
+                        and state_attr(e, 'color_mode') in ['hs', 'xy', 'rgb', 'rgbw', 'rgbww']
+                        and c is iterable and c is not string and c | count == 3 %}
+                    {% set ns.c = c | list %}
+                  {% endif %}
+                {% endfor %} {{ ns.c }}
+              next_index: |-
+                {% set n = color_list | count %}
+                {% if n < 2 or cur_rgb | count != 3 %}0{% else %}
+                  {% set cm = [cur_rgb | max, 1] | max %}
+                  {% set ns = namespace(best=0, d=99) %}
+                  {% for c in color_list %}
+                    {% set m = [c | max, 1] | max %}
+                    {% set d = (c[0] / m - cur_rgb[0] / cm) ** 2
+                             + (c[1] / m - cur_rgb[1] / cm) ** 2
+                             + (c[2] / m - cur_rgb[2] / cm) ** 2 %}
+                    {% if d < ns.d %}{% set ns.d = d %}{% set ns.best = loop.index0 %}{% endif %}
+                  {% endfor %}
+                  {{ (ns.best + 1) % n if ns.d <= color_match_max else 0 }}
+                {% endif %}
           - action: light.turn_on
             target:
               entity_id: "{{ tgt }}"
             data:
-              rgb_color: !input pink_color
+              rgb_color: "{{ color_list[next_index | int(0)] }}"
