@@ -1,7 +1,6 @@
 blueprint:
   name: SimpleLight
-  description: |
-    Simple Hue dimmer control. Button 1: on / off, decided by the individual lamps (the lamps inside Hue rooms / zones and Zigbee2MQTT groups), not by the state of the room, zone or group itself. When switching on, lights from the Philips Hue integration get Hue "Bright" (about 2725 K at full brightness) and all other lights get warm white at full brightness. Button 2: brighter (press = one step, hold = smooth ramp until release). Button 3: dimmer (press = one step, hold = smooth ramp until release). Button 4: dark pink. Zigbee2MQTT groups are detected automatically from the selected lights / area (a group that is selected, or whose lamps are all selected). They are commanded as a group when presses are spaced out, and lamp by lamp when presses come in quick succession, so the coordinator's broadcast limit (BUSY) is not hit. Once the remote has been quiet for a few seconds after button 1 switched on, the command is sent once more to the other lights, and every lamp of the group is asked for its real state. A lamp counts as confirmed only when it answers with the right values; a lamp that answers with something else, or does not answer within a few seconds, gets the command again and is asked again, up to five times.
+  description: Philips Hue Dimmer Switch control with on/off, dimming, colour and reliable Zigbee2MQTT groups.
   domain: automation
   author: Teddy
   source_url: https://github.com/TeodTodo/SimpleLight/blob/main/blueprints/automation/SimpleLight.yaml
