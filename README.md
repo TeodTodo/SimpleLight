@@ -7,7 +7,7 @@ Home Assistant automation blueprint for the Philips Hue Dimmer Switch (Hue integ
 | 1 | On / off (warm white; Hue lights get Hue "Bright") | — |
 | 2 | One step brighter | Smooth ramp up until release |
 | 3 | One step dimmer | Smooth ramp down until release |
-| 4 | Next color from a configurable list (cycles) | — |
+| 4 | Next enabled color from a configurable list (cycles) | — |
 
 Zigbee2MQTT groups are detected automatically from the selected lights / area. After switching on, every group lamp's real state is read back and lamps that missed the command are corrected (up to five rounds).
 
