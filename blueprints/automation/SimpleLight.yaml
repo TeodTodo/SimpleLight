@@ -1,0 +1,476 @@
+blueprint:
+  name: SimpleLight
+  description: |
+    Simple Hue dimmer control. Button 1: on / off, decided by the individual lamps (the lamps inside Hue rooms / zones and Zigbee2MQTT groups), not by the state of the room, zone or group itself. When switching on, lights from the Philips Hue integration get Hue "Bright" (about 2725 K at full brightness) and all other lights get warm white at full brightness. Button 2: brighter (press = one step, hold = smooth ramp until release). Button 3: dimmer (press = one step, hold = smooth ramp until release). Button 4: dark pink. Zigbee2MQTT groups are detected automatically from the selected lights / area (a group that is selected, or whose lamps are all selected). They are commanded as a group when presses are spaced out, and lamp by lamp when presses come in quick succession, so the coordinator's broadcast limit (BUSY) is not hit. Once the remote has been quiet for a few seconds after button 1 switched on, the command is sent once more to the other lights, and every lamp of the group is asked for its real state. A lamp counts as confirmed only when it answers with the right values; a lamp that answers with something else, or does not answer within a few seconds, gets the command again and is asked again, up to five times.
+  domain: automation
+  author: Teddy
+  source_url: https://github.com/TeodTodo/SimpleLight/blob/main/blueprints/automation/SimpleLight.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    remote:
+      name: Philips Hue Dimmer Switch
+      selector:
+        device:
+          filter:
+            - integration: mqtt
+              model: Hue dimmer switch gen 2
+            - integration: hue
+              model: Hue dimmer switch
+          multiple: false
+    enable_hue_triggers:
+      name: Enable Hue Hub triggers
+      description: Enable this when the dimmer is connected through the Philips Hue integration.
+      default: true
+      selector:
+        boolean: {}
+    enable_mqtt_triggers:
+      name: Enable MQTT / Zigbee2MQTT triggers
+      description: Enable this when the dimmer is connected through Zigbee2MQTT / MQTT.
+      default: false
+      selector:
+        boolean: {}
+    controlled_lights:
+      name: Lights / area
+      description: Zigbee2MQTT groups and their lamps are worked out automatically from this selection.
+      selector:
+        target:
+          entity:
+            - domain:
+                - light
+    z2m_base_topic:
+      name: Zigbee2MQTT base topic
+      description: Used to read the real state of the Zigbee2MQTT group lamps back from the lamps.
+      default: zigbee2mqtt
+      selector:
+        text:
+          multiline: false
+          multiple: false
+    pink_color:
+      name: Button 4 colour
+      default: [199, 21, 133]
+      selector:
+        color_rgb: {}
+
+mode: restart
+trace:
+  stored_traces: 50
+
+triggers:
+  # Zigbee2MQTT / MQTT dimmer
+  - trigger: device
+    domain: mqtt
+    device_id: !input remote
+    type: action
+    subtype: on_press_release
+    id: "on"
+    enabled: !input enable_mqtt_triggers
+  - trigger: device
+    domain: mqtt
+    device_id: !input remote
+    type: action
+    subtype: up_press_release
+    id: up
+    enabled: !input enable_mqtt_triggers
+  - trigger: device
+    domain: mqtt
+    device_id: !input remote
+    type: action
+    subtype: up_hold
+    id: up_hold
+    enabled: !input enable_mqtt_triggers
+  - trigger: device
+    domain: mqtt
+    device_id: !input remote
+    type: action
+    subtype: down_press_release
+    id: down
+    enabled: !input enable_mqtt_triggers
+  - trigger: device
+    domain: mqtt
+    device_id: !input remote
+    type: action
+    subtype: down_hold
+    id: down_hold
+    enabled: !input enable_mqtt_triggers
+  - trigger: device
+    domain: mqtt
+    device_id: !input remote
+    type: action
+    subtype: off_press_release
+    id: pink
+    enabled: !input enable_mqtt_triggers
+  # Philips Hue integration dimmer
+  - trigger: event
+    event_type: hue_event
+    event_data:
+      device_id: !input remote
+      type: short_release
+      subtype: 1
+    id: "on"
+    enabled: !input enable_hue_triggers
+  - trigger: event
+    event_type: hue_event
+    event_data:
+      device_id: !input remote
+      type: short_release
+      subtype: 2
+    id: up
+    enabled: !input enable_hue_triggers
+  - trigger: event
+    event_type: hue_event
+    event_data:
+      device_id: !input remote
+      type: long_press
+      subtype: 2
+    id: up_hold
+    enabled: !input enable_hue_triggers
+  - trigger: event
+    event_type: hue_event
+    event_data:
+      device_id: !input remote
+      type: short_release
+      subtype: 3
+    id: down
+    enabled: !input enable_hue_triggers
+  - trigger: event
+    event_type: hue_event
+    event_data:
+      device_id: !input remote
+      type: long_press
+      subtype: 3
+    id: down_hold
+    enabled: !input enable_hue_triggers
+  - trigger: event
+    event_type: hue_event
+    event_data:
+      device_id: !input remote
+      type: short_release
+      subtype: 4
+    id: pink
+    enabled: !input enable_hue_triggers
+
+conditions:
+  # A repeated hold event must not restart a ramp that is already running.
+  - condition: template
+    value_template: |-
+      {{ trigger.id not in ['up_hold', 'down_hold']
+         or (this.attributes.current | default(0) | int(0)) == 0 }}
+
+variables:
+  target: !input controlled_lights
+  z2m_base: !input z2m_base_topic
+  warm_kelvin: 2000
+  warm_brightness_pct: 100
+  warm_mired: "{{ (1000000 / warm_kelvin) | round(0) | int }}"
+  want_bri: "{{ (254 * warm_brightness_pct / 100) | round(0) | int }}"
+  hue_bright_kelvin: 2725
+  hue_bright_pct: 100
+  press_step: 10
+  ramp_pct_per_second: 25
+  min_brightness_pct: 1
+  burst_window_s: 5
+  verify_delay_ms: 4000
+  verify_read_timeout_ms: 6000
+  verify_settle_ms: 1000
+  verify_rounds: 5
+  light_ids: "{% set t = target %} {% set e = t.entity_id | default([]) %}{% set e = [e] if e is string else e %} {% set a = t.area_id | default([]) %}{% set a = [a] if a is string else a %} {% set d = t.device_id | default([]) %}{% set d = [d] if d is string else d %} {% set ns = namespace(ids=e | list) %} {% for x in a %}{% set ns.ids = ns.ids + (area_entities(x) | select('search', '^light[.]') | list) %}{% endfor %} {% for x in d %}{% set ns.ids = ns.ids + (device_entities(x) | select('search', '^light[.]') | list) %}{% endfor %} {{ ns.ids | unique | list }}"
+  # Zigbee2MQTT groups: selected directly, or all of their lamps are selected.
+  groups: |-
+    {% set ns = namespace(g=[]) %} {% for e in integration_entities('mqtt') | select('search', '^light[.]') %}
+      {% set ge = state_attr(e, 'group_entities') %}
+      {% if ge is iterable and ge is not string and ge | count > 0
+            and (e in light_ids or ge | reject('in', light_ids) | list | count == 0) %}
+        {% set ns.g = ns.g + [e] %}
+      {% endif %}
+    {% endfor %} {{ ns.g }}
+  members: |-
+    {% set ns = namespace(m=[]) %} {% for g in groups %}
+      {% set ns.m = ns.m + (state_attr(g, 'group_entities') | list) %}
+    {% endfor %} {{ ns.m | unique | list }}
+  hue_ids: "{{ light_ids | select('in', integration_entities('hue')) | list }}"
+  hue_group_lamps: |-
+    {% set ns = namespace(m=[]) %} {% for e in light_ids if state_attr(e, 'is_hue_group') %}
+      {% set ge = state_attr(e, 'entity_id') %}
+      {% if ge is iterable and ge is not string %}
+        {% set ns.m = ns.m + (ge | list) %}
+      {% endif %}
+    {% endfor %} {{ ns.m | unique | list }}
+  # The individual lamps that decide on / off (not rooms, zones or groups).
+  state_ids: |-
+    {% set ns = namespace(s=[]) %} {% for e in light_ids if e not in groups %}
+      {% set ge = state_attr(e, 'entity_id') if state_attr(e, 'is_hue_group') else none %}
+      {% if not (ge is iterable and ge is not string and ge | count > 0) %}
+        {% set ns.s = ns.s + [e] %}
+      {% endif %}
+    {% endfor %} {{ (ns.s + members + hue_group_lamps) | unique | list }}
+  any_on: "{{ state_ids | select('is_state', 'on') | list | count > 0 }}"
+  prev_trigger_age_s: "{% set lt = this.attributes.last_triggered | default(none) %} {% set lt = as_datetime(lt) if lt is string else lt %} {{ (now() - lt).total_seconds() | round(1) if lt else 99999 }}"
+  # Quick successive presses: command group lamps one by one instead of broadcasting.
+  use_group: "{{ members | count == 0 or prev_trigger_age_s | float(99999) > burst_window_s }}"
+  tgt: |-
+    {{ ((light_ids | reject('in', members) | list) + groups) | unique | list
+       if use_group
+       else ((light_ids | reject('in', groups) | list) + members) | unique | list }}
+  tgt_hue: "{{ tgt | select('in', hue_ids) | list }}"
+  tgt_std: "{{ tgt | reject('in', hue_ids) | list }}"
+  all_ids: "{{ (light_ids + members) | unique | list }}"
+  other_ids: "{{ light_ids | reject('in', groups) | reject('in', members) | list }}"
+  other_hue: "{{ other_ids | select('in', hue_ids) | list }}"
+  other_std: "{{ other_ids | reject('in', hue_ids) | list }}"
+  on_ids: "{{ all_ids | select('is_state', 'on') | list }}"
+  tgt_on: "{{ tgt | select('is_state', 'on') | list }}"
+  bri_list: "{{ on_ids | map('state_attr', 'brightness') | select('number') | list }}"
+  ref_up: "{{ ((bri_list | max) / 255 * 100) | round(0) | int if bri_list | count > 0 else 0 }}"
+  ref_down: "{{ ((bri_list | min) / 255 * 100) | round(0) | int if bri_list | count > 0 else 0 }}"
+
+actions:
+  - choose:
+      # Button 1: on / off
+      - conditions:
+          - condition: trigger
+            id: "on"
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ any_on }}"
+            then:
+              - action: light.turn_off
+                target:
+                  entity_id: "{{ tgt }}"
+            else:
+              - if:
+                  - condition: template
+                    value_template: "{{ tgt_std | count > 0 }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ tgt_std }}"
+                    data:
+                      color_temp_kelvin: "{{ warm_kelvin }}"
+                      brightness_pct: "{{ warm_brightness_pct }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ tgt_hue | count > 0 }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ tgt_hue }}"
+                    data:
+                      color_temp_kelvin: "{{ hue_bright_kelvin }}"
+                      brightness_pct: "{{ hue_bright_pct }}"
+              - delay:
+                  milliseconds: "{{ verify_delay_ms }}"
+              # Send the command once more to the non-group lights.
+              - if:
+                  - condition: template
+                    value_template: "{{ other_std | count > 0 }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ other_std }}"
+                    data:
+                      color_temp_kelvin: "{{ warm_kelvin }}"
+                      brightness_pct: "{{ warm_brightness_pct }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ other_hue | count > 0 }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ other_hue }}"
+                    data:
+                      color_temp_kelvin: "{{ hue_bright_kelvin }}"
+                      brightness_pct: "{{ hue_bright_pct }}"
+              # Read every group lamp's real state back and correct the ones that missed the command.
+              - if:
+                  - condition: template
+                    value_template: "{{ members | count > 0 }}"
+                then:
+                  - variables:
+                      to_check: "{{ members }}"
+                      bad_lamps: []
+                  - repeat:
+                      count: "{{ verify_rounds }}"
+                      sequence:
+                        - variables:
+                            bad_lamps: []
+                        - repeat:
+                            for_each: "{{ to_check }}"
+                            sequence:
+                              - variables:
+                                  lamp: "{{ repeat.item }}"
+                                  lamp_name: "{{ device_attr(device_id(repeat.item), 'name') or '' }}"
+                                  read_ts: "{{ as_timestamp(now()) }}"
+                              - if:
+                                  - condition: template
+                                    value_template: "{{ lamp_name != '' }}"
+                                then:
+                                  - action: mqtt.publish
+                                    data:
+                                      topic: "{{ z2m_base }}/{{ lamp_name }}/get"
+                                      payload: '{"color_temp":""}'
+                                  - wait_for_trigger:
+                                      - trigger: mqtt
+                                        topic: "{{ z2m_base }}/{{ lamp_name }}"
+                                    timeout:
+                                      milliseconds: "{{ verify_read_timeout_ms }}"
+                                    continue_on_timeout: true
+                                  - if:
+                                      - condition: template
+                                        value_template: |-
+                                          {% set p = wait.trigger.payload_json if wait.trigger is not none else none %} {% set seen = as_timestamp(p.last_seen, none)
+                                             if p is mapping and p.last_seen is defined else none %}
+                                          {{ not (p is mapping
+                                                  and p.state == 'ON'
+                                                  and p.color_mode == 'color_temp'
+                                                  and p.color_temp is number
+                                                  and (p.color_temp - warm_mired) | abs <= 15
+                                                  and p.brightness is number
+                                                  and (p.brightness - want_bri) | abs <= 8
+                                                  and (seen is none or seen >= read_ts - 2)) }}
+                                    then:
+                                      - variables:
+                                          bad_lamps: "{{ bad_lamps + [lamp] }}"
+                                      - action: light.turn_on
+                                        target:
+                                          entity_id: "{{ lamp }}"
+                                        data:
+                                          color_temp_kelvin: "{{ warm_kelvin }}"
+                                          brightness_pct: "{{ warm_brightness_pct }}"
+                        - if:
+                            - condition: template
+                              value_template: "{{ bad_lamps | count == 0 }}"
+                          then:
+                            - stop: All group lamps confirmed
+                        - variables:
+                            to_check: "{{ bad_lamps }}"
+                        - delay:
+                            milliseconds: "{{ verify_settle_ms }}"
+
+      # Button 2 press: one step brighter
+      - conditions:
+          - condition: trigger
+            id: up
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: "{{ tgt }}"
+            data:
+              brightness_pct: "{{ [ref_up + press_step, 100] | min }}"
+
+      # Button 2 hold: ramp up until release
+      - conditions:
+          - condition: trigger
+            id: up_hold
+          - condition: template
+            value_template: "{{ ref_up < 100 }}"
+        sequence:
+          - variables:
+              ramp_seconds: "{{ ((100 - ref_up) / ramp_pct_per_second) | round(2) }}"
+              ramp_start: "{{ as_timestamp(now()) }}"
+          - action: light.turn_on
+            target:
+              entity_id: "{{ tgt }}"
+            data:
+              brightness_pct: 100
+              transition: "{{ ramp_seconds }}"
+          - wait_for_trigger:
+              - trigger: device
+                domain: mqtt
+                device_id: !input remote
+                type: action
+                subtype: up_hold_release
+                enabled: !input enable_mqtt_triggers
+              - trigger: event
+                event_type: hue_event
+                event_data:
+                  device_id: !input remote
+                  type: long_release
+                  subtype: 2
+                enabled: !input enable_hue_triggers
+            timeout:
+              milliseconds: "{{ (ramp_seconds * 1000) | int }}"
+            continue_on_timeout: true
+          - if:
+              - condition: template
+                value_template: "{{ wait.trigger is not none }}"
+            then:
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ tgt }}"
+                data:
+                  brightness_pct: |-
+                    {{ [ref_up + (as_timestamp(now()) - ramp_start) * ramp_pct_per_second, 100]
+                       | min | round(0) | int }}
+                  transition: 0
+
+      # Button 3 press: one step dimmer
+      - conditions:
+          - condition: trigger
+            id: down
+          - condition: template
+            value_template: "{{ tgt_on | count > 0 }}"
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: "{{ tgt_on }}"
+            data:
+              brightness_pct: "{{ [ref_down - press_step, min_brightness_pct] | max }}"
+
+      # Button 3 hold: ramp down until release
+      - conditions:
+          - condition: trigger
+            id: down_hold
+          - condition: template
+            value_template: "{{ tgt_on | count > 0 and ref_down > min_brightness_pct }}"
+        sequence:
+          - variables:
+              ramp_seconds: "{{ ((ref_down - min_brightness_pct) / ramp_pct_per_second) | round(2) }}"
+              ramp_start: "{{ as_timestamp(now()) }}"
+          - action: light.turn_on
+            target:
+              entity_id: "{{ tgt_on }}"
+            data:
+              brightness_pct: "{{ min_brightness_pct }}"
+              transition: "{{ ramp_seconds }}"
+          - wait_for_trigger:
+              - trigger: device
+                domain: mqtt
+                device_id: !input remote
+                type: action
+                subtype: down_hold_release
+                enabled: !input enable_mqtt_triggers
+              - trigger: event
+                event_type: hue_event
+                event_data:
+                  device_id: !input remote
+                  type: long_release
+                  subtype: 3
+                enabled: !input enable_hue_triggers
+            timeout:
+              milliseconds: "{{ (ramp_seconds * 1000) | int }}"
+            continue_on_timeout: true
+          - if:
+              - condition: template
+                value_template: "{{ wait.trigger is not none }}"
+            then:
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ tgt_on }}"
+                data:
+                  brightness_pct: |-
+                    {{ [ref_down - (as_timestamp(now()) - ramp_start) * ramp_pct_per_second, min_brightness_pct]
+                       | max | round(0) | int }}
+                  transition: 0
+
+      # Button 4: colour
+      - conditions:
+          - condition: trigger
+            id: pink
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: "{{ tgt }}"
+            data:
+              rgb_color: !input pink_color
