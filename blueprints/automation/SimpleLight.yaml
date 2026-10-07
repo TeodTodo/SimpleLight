@@ -37,14 +37,6 @@ blueprint:
           entity:
             - domain:
                 - light
-    z2m_base_topic:
-      name: Zigbee2MQTT base topic
-      description: Used to read the real state of the Zigbee2MQTT group lamps back from the lamps.
-      default: zigbee2mqtt
-      selector:
-        text:
-          multiline: false
-          multiple: false
     colors:
       name: Button 4 colors
       description: Each press of button 4 switches the lights to the next color in this list, then starts again from the first.
@@ -168,7 +160,6 @@ conditions:
 
 variables:
   target: !input controlled_lights
-  z2m_base: !input z2m_base_topic
   color_input: !input colors
   # Accepts list items as {color: [r, g, b]} or as a bare [r, g, b].
   color_list: |-
@@ -328,11 +319,11 @@ actions:
                                 then:
                                   - action: mqtt.publish
                                     data:
-                                      topic: "{{ z2m_base }}/{{ lamp_name }}/get"
+                                      topic: "zigbee2mqtt/{{ lamp_name }}/get"
                                       payload: '{"color_temp":""}'
                                   - wait_for_trigger:
                                       - trigger: mqtt
-                                        topic: "{{ z2m_base }}/{{ lamp_name }}"
+                                        topic: "zigbee2mqtt/{{ lamp_name }}"
                                     timeout:
                                       milliseconds: "{{ verify_read_timeout_ms }}"
                                     continue_on_timeout: true
