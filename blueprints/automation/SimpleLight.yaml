@@ -39,9 +39,10 @@ blueprint:
                 - light
     colors:
       name: Button 4 colors
-      description: Each press of button 4 switches the lights to the next color in this list, then starts again from the first.
+      description: Each press of button 4 switches the lights to the next enabled color in this list, then starts again from the first. Untick Enabled to skip a color without deleting it.
       default:
         - color: [199, 21, 133]
+          enabled: true
       selector:
         object:
           multiple: true
@@ -52,6 +53,10 @@ blueprint:
               required: true
               selector:
                 color_rgb: {}
+            enabled:
+              label: Enabled
+              selector:
+                boolean: {}
 
 mode: restart
 trace:
@@ -161,11 +166,12 @@ conditions:
 variables:
   target: !input controlled_lights
   color_input: !input colors
-  # Accepts list items as {color: [r, g, b]} or as a bare [r, g, b].
+  # Accepts list items as {color: [r, g, b], enabled: bool} or as a bare [r, g, b]. A missing enabled counts as enabled.
   color_list: |-
     {% set ns = namespace(c=[]) %} {% for i in (color_input if color_input is iterable and color_input is not string else []) %}
       {% set c = i.color if i is mapping else i %}
-      {% if c is iterable and c is not string and c | count == 3 %}
+      {% set on = (i.enabled | default(true)) if i is mapping else true %}
+      {% if on is not false and c is iterable and c is not string and c | count == 3 %}
         {% set ns.c = ns.c + [c | map('int') | list] %}
       {% endif %}
     {% endfor %} {{ ns.c }}
